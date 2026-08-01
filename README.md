@@ -61,6 +61,44 @@ Result:
 }
 ```
 
+## Batch Requests
+
+Send a JSON array to process multiple calls in one HTTP request. Each call gets a matching response, in order:
+
+```bash
+[
+  {"jsonrpc": "2.0", "method": "add", "params": [1, 2], "id": 1},
+  {"jsonrpc": "2.0", "method": "add", "params": [3, 4], "id": 2}
+]
+```
+
+Result:
+
+```bash
+[
+  {"jsonrpc": "2.0", "result": 3, "id": 1},
+  {"jsonrpc": "2.0", "result": 7, "id": 2}
+]
+```
+
+## Notifications
+
+Omit `id` to send a notification: the method still runs, but no response is sent (HTTP 204 No Content). Use this for fire-and-forget calls where you don't need the result:
+
+```bash
+{"jsonrpc": "2.0", "method": "add", "params": [1, 2]}
+```
+
+A batch made up entirely of notifications also gets no response body.
+
+## Limitations
+
+This project favors a small, readable, stdlib-only implementation over feature completeness:
+
+- No HTTPS - put a reverse proxy (nginx, Caddy) in front if you need TLS.
+- No authentication or authorization - add your own layer if the server is exposed beyond a trusted network.
+- Threaded, not async - each request runs in its own thread (`ThreadingHTTPServer`), which is enough to avoid one slow call blocking others, but it isn't an async event loop and won't scale to very high concurrency.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit pull requests or open issues to improve the project.

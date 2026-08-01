@@ -22,12 +22,12 @@ setup(
         'Tracker': 'https://github.com/gclluch/jsonrpc-server/issues',
     },
     python_requires='>=3.6',
-    install_requires=[
-        'requests'
-    ],
+    # Stdlib only - the server has no runtime dependencies. `requests` is a
+    # test-suite convenience for driving the HTTP handler, not a runtime need.
+    install_requires=[],
     extras_require={
         'dev': ['check-manifest'],
-        'test': ['coverage'],
+        'test': ['coverage', 'pytest', 'requests'],
     },
     include_package_data=True,
     classifiers=[

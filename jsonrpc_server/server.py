@@ -1,25 +1,29 @@
-"""JSON-RPC server implementation."""
+"""JSON-RPC 2.0 server implementation (stdlib only)."""
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 
 
 class JSONRPCException(Exception):
-    def __init__(self, code, message, id_):
+    """Carries a JSON-RPC error code/message/id through the call stack."""
+
+    def __init__(self, code, message, id_=None):
         self.code = code
         self.message = message
         self.id = id_
         super().__init__(message)
 
 
-class JSONRPCNotification(Exception):
-    """Raised to indicate a JSON-RPC notification."""
-    pass
-
-
 class JSONRPCServer(BaseHTTPRequestHandler):
-    """JSON-Rjsonrpc server implementation."""
+    """JSON-RPC server implementation."""
+
     methods = {}
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # ponytail: give every subclass its own registry instead of sharing
+        # (and silently mutating) the base class's dict.
+        cls.methods = {}
 
     @classmethod
     def register_method(cls, name, method):
@@ -30,71 +34,73 @@ class JSONRPCServer(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests."""
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-
-        try: 
+        try:
+            post_data = self._read_body()
             json_data = self.parse_request_data(post_data)
-            if isinstance(json_data, list):  # Check if it's a batch request
-                result = self.process_batch_request(json_data)  # Call process_batch_request
-            else:
-                result = self.process_request(json_data)
 
+            if isinstance(json_data, list):
+                result = self.process_batch_request(json_data)
+            elif isinstance(json_data, dict):
+                result = self.process_single_request(json_data)
+            else:
+                raise JSONRPCException(-32600, "Invalid Request", None)
         except JSONRPCException as e:
-            json_id = None if 'json_data' not in locals() else json_data.get('id')
-            result = self.error_response(e.code, e.message, json_id) 
-        
-        
-        # Check if the result is None (indicating a notification) and skip sending a response
+            result = json.dumps(self.error_response(e.code, e.message, e.id)), 200
+
         if result is None:
-            self.send_response(204)  # 204 No Content
+            self.send_response(204)  # No Content: request was a notification (or all-notification batch)
             self.end_headers()
             return
-        
-        # Otherwise, unpack the response and status code and send them as usual
+
         response, status_code = result
         self.send_response(status_code)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(response.encode('utf-8'))
 
-    def process_request(self, json_data):
-        """Process the JSON-RPC request."""
+    def _read_body(self):
+        """Read the request body using Content-Length."""
         try:
-            # json_data = selfz.parse_request_data(data)
+            content_length = int(self.headers.get('Content-Length'))
+        except (TypeError, ValueError):
+            raise JSONRPCException(-32600, "Invalid Request: Content-Length header is required", None)
+        return self.rfile.read(content_length)
+
+    def process_single_request(self, json_data):
+        """Process a single JSON-RPC request object."""
+        response = self.handle_one(json_data)
+        if response is None:  # notification: no response body at all
+            return None
+        return json.dumps(response), 200
+
+    def process_batch_request(self, requests):
+        """Process a batch of JSON-RPC requests."""
+        if not requests:
+            return json.dumps(self.error_response(-32600, "Invalid Request: batch array must not be empty", None)), 200
+
+        responses = [r for r in (self.handle_one(item) for item in requests) if r is not None]
+        if not responses:  # every element was a notification
+            return None
+        return json.dumps(responses), 200
+
+    def handle_one(self, json_data):
+        """Handle a single JSON-RPC request object, returning a response dict, or None for a notification."""
+        try:
+            if not isinstance(json_data, dict):
+                raise JSONRPCException(-32600, "Invalid Request", None)
             self.validate_jsonrpc_version(json_data)
-            if 'id' not in json_data:  # It's a notification
+            # A missing 'id' key means notification. "id": null IS a request
+            # (with a null id) per spec, even though clients SHOULD avoid it.
+            if 'id' not in json_data:
                 self.handle_notification(json_data)
-                return None  # No response for notifications
+                return None
 
             method, params = self.get_method_and_params(json_data)
             result = self.invoke_method(method, params, json_data)
             return self.success_response(result, json_data['id'])
         except JSONRPCException as e:
-            json_id = None if 'json_data' not in locals() else json_data.get('id')
-            return self.error_response(e.code, e.message, json_id)  
-    
-    def process_batch_request(self, requests):
-        """Process a batch of JSON-RPC requests."""
-        responses = []
-        for request in requests:
-            try:
-                self.validate_jsonrpc_version(request)
-                if 'id' not in request:  # It's a notification
-                    self.handle_notification(request)
-                    continue  # No response for notifications
+            return self.error_response(e.code, e.message, e.id)
 
-                method, params = self.get_method_and_params(request)
-                result = self.invoke_method(method, params, request)
-                response_object = json.loads(self.success_response(result, request['id'])[0])  # Parse JSON string back to dict
-                responses.append(response_object)  # Append the response object directly
-            except JSONRPCException as e:
-                json_id = request.get('id')
-                error_response_object = json.loads(self.error_response(e.code, e.message, json_id)[0])  # Parse JSON string back to dict
-                responses.append(error_response_object)
-
-        return json.dumps(responses), 200  # Return all responses as a JSON array
-    
     def parse_request_data(self, data):
         """Parse the request data."""
         try:
@@ -108,10 +114,14 @@ class JSONRPCServer(BaseHTTPRequestHandler):
             raise JSONRPCException(-32600, "Invalid Request: JSON-RPC version must be '2.0'", json_data.get('id'))
 
     def handle_notification(self, json_data):
-        """Execute the method for a JSON-RPC notification."""
-        method_name = json_data.get('method')
-        if method_name in self.methods:
-            self.methods[method_name](**json_data.get('params', {}))
+        """Execute the method for a JSON-RPC notification. Errors are swallowed: notifications never get a response."""
+        method = self.methods.get(json_data.get('method'))
+        if method is None:
+            return
+        try:
+            self.invoke_method(method, json_data.get('params'), json_data)
+        except JSONRPCException:
+            pass
 
     def get_method_and_params(self, json_data):
         """Get the method and params from the JSON-RPC request."""
@@ -127,25 +137,33 @@ class JSONRPCServer(BaseHTTPRequestHandler):
 
     def invoke_method(self, method, params, json_data):
         """Invoke the method with the given params."""
-        if params is None:
-            return method()
-        elif isinstance(params, list):
-            return method(*params)
-        elif isinstance(params, dict):
-            return method(**params)
-        else:
-            raise JSONRPCException(-32602, "Invalid params", json_data.get('id'))
+        try:
+            if params is None:
+                return method()
+            elif isinstance(params, list):
+                return method(*params)
+            elif isinstance(params, dict):
+                return method(**params)
+            else:
+                raise JSONRPCException(-32602, "Invalid params", json_data.get('id'))
+        except TypeError as e:
+            raise JSONRPCException(-32602, "Invalid params", json_data.get('id')) from e
+        except JSONRPCException:
+            raise
+        except Exception as e:
+            raise JSONRPCException(-32603, "Internal error", json_data.get('id')) from e
 
     def success_response(self, result, id_):
-        """Create a successful JSON-RPC response."""
-        return json.dumps({"jsonrpc": "2.0", "result": result, "id": id_}), 200
+        """Build a successful JSON-RPC response object."""
+        return {"jsonrpc": "2.0", "result": result, "id": id_}
 
     def error_response(self, code, message, id_):
-        """Create an error JSON-RPC response."""
-        return json.dumps({"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": id_}), 400
+        """Build a JSON-RPC error response object."""
+        return {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": id_}
+
 
 def run(
-    server_class=HTTPServer,
+    server_class=ThreadingHTTPServer,
     handler_class=JSONRPCServer,
     address='',
     port=8000
