@@ -5,15 +5,37 @@ on:
   pull_request:
 
 jobs:
+  # Deliberately does NOT install the package: the suite must pass against a
+  # plain clone. Installing first is what hid a fixture that could only import
+  # `jsonrpc_server` from site-packages.
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.12"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -r requirements.txt -e .
+      - run: pip install pytest requests
       - run: pytest -q
+      - name: run from the tests directory too
+        working-directory: tests
+        run: pytest -q
+
+  # Separately proves the packaging still works.
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[test]"
+      - run: python -c "import jsonrpc_server; print(jsonrpc_server.JSONRPCServer)"
+      - name: the package must declare no runtime dependencies
+        run: |
+          deps=$(pip show jsonrpc-server-py | awk -F': ' '/^Requires:/ {print $2}')
+          test -z "$deps" || { echo "unexpected runtime deps: $deps"; exit 1; }
