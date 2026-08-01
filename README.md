@@ -1,14 +1,16 @@
 # JSON-RPC Server for Python
 
-A lightweight, easy-to-use JSON-RPC 2.0 server implementation in Python, designed for simplicity and minimal dependencies. This package allows you to quickly set up a JSON-RPC server to handle remote procedure calls in a standardized way, supporting both single and batch requests.
+A JSON-RPC 2.0 server in **~200 lines of pure standard library** — no dependencies, at install time or at runtime. `pip install jsonrpc-server-py` pulls in nothing else, and CI asserts that on every push.
+
+That is the whole pitch. If you want middleware, async, or an ecosystem, use [`jsonrpcserver`](https://pypi.org/project/jsonrpcserver/). If you want a spec-compliant endpoint you can read start to finish and vendor into a project that cannot take on dependencies, use this.
 
 ## Features
 
-- Simple and straightforward JSON-RPC 2.0 compliance.
-- Supports method registration for handling RPC calls.
-- Handles single and batch requests.
-- Built-in support for notifications (requests without response).
-- Easy integration into existing Python applications.
+- **Zero dependencies** — stdlib `http.server` and `json`, nothing more.
+- Spec-compliant error codes: `-32700` parse, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, `-32603` internal error.
+- Single requests, batches, and notifications (including all-notification batches, which correctly return no body).
+- Threaded by default (`ThreadingHTTPServer`), so one slow method does not block every other client.
+- Errors travel in the JSON body with HTTP 200, as the spec intends — the transport succeeded even when the call did not.
 
 Refer here for details: https://www.jsonrpc.org/specification
 

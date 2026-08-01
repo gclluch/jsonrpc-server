@@ -7,7 +7,7 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name='jsonrpc-server-py',
-    version='0.2.0',
+    version='0.3.0',
     packages=find_packages(),
     description='A simple JSON-RPC server',
     long_description=long_description,
@@ -21,7 +21,7 @@ setup(
         'Source': 'https://github.com/gclluch/jsonrpc-server',
         'Tracker': 'https://github.com/gclluch/jsonrpc-server/issues',
     },
-    python_requires='>=3.6',
+    python_requires='>=3.7',  # ThreadingHTTPServer
     # Stdlib only - the server has no runtime dependencies. `requests` is a
     # test-suite convenience for driving the HTTP handler, not a runtime need.
     install_requires=[],
@@ -35,10 +35,5 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Operating System :: OS Independent',
     ],
-    entry_points={
-        'console_scripts': [
-            'jsonrpc-server=jsonrpc_server:main',
-        ],
-    },
 )
 
