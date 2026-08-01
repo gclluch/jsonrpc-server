@@ -1,5 +1,7 @@
 # tests/test_server.py
+import os
 import pytest
+import socket
 import subprocess
 import sys
 import time
@@ -10,12 +12,34 @@ from pathlib import Path
 SERVER_URL = "http://localhost:8000"
 FIXTURE_PATH = Path(__file__).parent / "server_fixture.py"
 
+REPO_ROOT = Path(__file__).parent.parent
+
+
 @pytest.fixture(scope="session", autouse=True)
 def server():
-    # Start the server fixture as a subprocess. Use an absolute path (not cwd-relative)
-    # and sys.executable, so this works regardless of where pytest is invoked from.
-    server_process = subprocess.Popen([sys.executable, str(FIXTURE_PATH)])
-    time.sleep(1)  # Adjust as necessary to allow the server time to start
+    # The subprocess gets an explicit PYTHONPATH pointing at the repo root, so
+    # `import jsonrpc_server` resolves from a plain clone. Without it the suite
+    # only passed when the package happened to be pip-installed.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), env["PYTHONPATH"]] if env.get("PYTHONPATH") else [str(REPO_ROOT)]
+    )
+    server_process = subprocess.Popen([sys.executable, str(FIXTURE_PATH)], env=env)
+
+    # Poll for readiness rather than sleeping a fixed second: a slow machine
+    # made the old fixed sleep flaky, and a fast one wasted the wait.
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if server_process.poll() is not None:
+            raise RuntimeError(f"server exited early with code {server_process.returncode}")
+        try:
+            with socket.create_connection(("localhost", 8000), timeout=0.25):
+                break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        server_process.terminate()
+        raise RuntimeError("server did not start listening within 15s")
 
     yield server_process
 
@@ -197,3 +221,80 @@ def test_all_notification_batch_returns_no_content():
     response = requests.post(SERVER_URL, json=batch_data)
     assert response.status_code == 204
     assert not response.content
+
+
+def test_invalid_utf8_body_is_a_parse_error():
+    # Raw bytes that are not valid UTF-8. This used to raise UnicodeDecodeError
+    # inside the handler and reset the connection instead of answering.
+    response = requests.post(SERVER_URL, data=b"\xff\xfe", headers={'Content-Type': 'application/json'})
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32700
+
+
+def test_nonserializable_result_returns_internal_error():
+    response = post_json_rpc("nonserializable", params=[], id=1)
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32603
+
+
+def test_nonserializable_result_does_not_kill_the_rest_of_the_batch():
+    batch = [
+        {"jsonrpc": "2.0", "method": "ping", "id": 1},
+        {"jsonrpc": "2.0", "method": "nonserializable", "id": 2},
+        {"jsonrpc": "2.0", "method": "sum", "params": [1, 2], "id": 3},
+    ]
+    response = requests.post(SERVER_URL, json=batch)
+    assert response.status_code == 200
+    by_id = {r["id"]: r for r in response.json()}
+    assert by_id[1]["result"] == "pong"
+    assert by_id[2]["error"]["code"] == -32603
+    assert by_id[3]["result"] == 3
+
+
+def test_type_error_inside_method_is_internal_not_invalid_params():
+    # The caller's params are fine; the method body is what fails.
+    response = post_json_rpc("type_error_inside", params=[], id=1)
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32603
+
+
+def test_oversized_content_length_is_rejected_not_hung():
+    # A Content-Length far beyond the cap, with no body to back it up. Without
+    # the cap the handler blocks trying to read a gigabyte that never arrives.
+    conn = socket.create_connection(("localhost", 8000), timeout=5)
+    try:
+        conn.sendall(
+            b"POST / HTTP/1.1\r\nHost: localhost\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 999999999\r\n\r\n"
+        )
+        conn.settimeout(5)
+        # Headers and body can land in separate packets; read until the body is
+        # complete rather than assuming one recv covers both.
+        raw = b""
+        while b"\r\n\r\n" not in raw:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            raw += chunk
+        head, _, body = raw.partition(b"\r\n\r\n")
+        length = int(dict(
+            line.split(b": ", 1) for line in head.split(b"\r\n")[1:] if b": " in line
+        ).get(b"Content-Length", b"0"))
+        while len(body) < length:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            body += chunk
+        raw = (head + b"\r\n\r\n" + body).decode("utf-8", "replace")
+    finally:
+        conn.close()
+    assert "200" in raw.splitlines()[0]
+    assert '"code": -32600' in raw
+
+
+@pytest.mark.parametrize("bad_id", [{"a": 1}, [1, 2], True])
+def test_invalid_id_type_is_rejected(bad_id):
+    response = requests.post(SERVER_URL, json={"jsonrpc": "2.0", "method": "ping", "id": bad_id})
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32600
