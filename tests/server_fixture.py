@@ -1,6 +1,6 @@
 # server_fixture.py
 
-from jsonrpc_server import run, register_method
+from jsonrpc_server import JSONRPCException, run, register_method
 
 def sum_numbers(*args, **kwargs):
     # If positional arguments are used
@@ -29,12 +29,20 @@ def nonserializable():
     return {1, 2, 3}
 
 # Register methods with the server
+
+def app_error():
+    # An application-level failure in the spec's server-defined range. The
+    # handler cannot know the request id, so the server must attach it.
+    raise JSONRPCException(-32001, "Application specific error")
+
+
 register_method('sum', sum_numbers)
 register_method('hello', say_hello)
 register_method('ping', ping)  # Register the ping method
 register_method('boom', boom)  # Always raises, for testing -32603
 register_method('type_error_inside', type_error_inside)
 register_method('nonserializable', nonserializable)
+register_method('app_error', app_error)
 
 # This will run the server when the file is executed
 if __name__ == "__main__":

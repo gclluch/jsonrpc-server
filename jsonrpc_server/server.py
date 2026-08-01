@@ -107,13 +107,22 @@ class JSONRPCServer(BaseHTTPRequestHandler):
         try:
             if not isinstance(json_data, dict):
                 raise JSONRPCException(-32600, "Invalid Request", None)
+
+            # Structural validation runs BEFORE the notification branch. A
+            # malformed object is an Invalid Request even with no `id` - the
+            # spec's own example {"jsonrpc":"2.0","method":1,"params":"bar"}
+            # must answer -32600 with a null id, not be swallowed as a
+            # notification. Anything reached after this point is well-formed.
+            if 'id' in json_data:
+                self.validate_id(json_data['id'])
             self.validate_jsonrpc_version(json_data)
+            self.validate_method_name(json_data)
+
             # A missing 'id' key means notification. "id": null IS a request
             # (with a null id) per spec, even though clients SHOULD avoid it.
             if 'id' not in json_data:
                 self.handle_notification(json_data)
                 return None
-            self.validate_id(json_data['id'])
 
             method, params = self.get_method_and_params(json_data)
             result = self.invoke_method(method, params, json_data)
@@ -161,6 +170,16 @@ class JSONRPCServer(BaseHTTPRequestHandler):
         """Validate the JSON-RPC version."""
         if json_data.get('jsonrpc') != '2.0':
             raise JSONRPCException(-32600, "Invalid Request: JSON-RPC version must be '2.0'", json_data.get('id'))
+
+    @staticmethod
+    def validate_method_name(json_data):
+        """`method` must be present and a string, regardless of notification-ness."""
+        if not isinstance(json_data.get('method'), str):
+            raise JSONRPCException(
+                -32600,
+                "Invalid Request: Method name is required and must be a string.",
+                json_data.get('id'),
+            )
 
     def handle_notification(self, json_data):
         """Execute the method for a JSON-RPC notification. Errors are swallowed: notifications never get a response."""
@@ -215,7 +234,12 @@ class JSONRPCServer(BaseHTTPRequestHandler):
 
         try:
             return method(*args, **kwargs)
-        except JSONRPCException:
+        except JSONRPCException as e:
+            # A handler raising for an application error (the -32000..-32099
+            # server-defined range) won't know the request id. Fill it in, or
+            # the client gets a correct code attached to a null id.
+            if e.id is None:
+                e.id = id_
             raise
         except Exception as e:
             raise JSONRPCException(-32603, "Internal error", id_) from e
